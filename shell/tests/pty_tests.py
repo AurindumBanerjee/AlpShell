@@ -31,6 +31,7 @@ class Terminal:
             os.execv(SHELL, [SHELL])
         self.buf = ""
         self.mark = 0
+        self.status = None  # exit status of the shell once it has been reaped
 
     def send(self, text):
         os.write(self.fd, text.encode())
@@ -67,8 +68,21 @@ class Terminal:
         return self.expect(r"\r\n" + re.escape(word) + r"\r\n", timeout)
 
     def alive(self):
-        done, _ = os.waitpid(self.pid, os.WNOHANG)
+        if self.status is not None:
+            return False
+        done, status = os.waitpid(self.pid, os.WNOHANG)
+        if done != 0:
+            self.status = status
         return done == 0
+
+    def wait_exit(self, timeout=5.0):
+        """Waits for the shell to exit and returns its exit code."""
+        deadline = time.time() + timeout
+        while self.alive():
+            if time.time() > deadline:
+                raise AssertionError("the shell did not exit")
+            time.sleep(0.05)
+        return os.waitstatus_to_exitcode(self.status)
 
     def close(self):
         if self.alive():
@@ -241,6 +255,123 @@ class JobControlTests(unittest.TestCase):
         time.sleep(0.2)
         self.term.echoes("PROMPT_STILL_WORKS")
         self.assertNotIn("\r\nshould_not_run\r\n", self.term.buf)
+
+
+class StatusAndSessionTests(unittest.TestCase):
+    def setUp(self):
+        self.home = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.home.cleanup()
+
+    def start(self):
+        term = Terminal(self.home.name)
+        term.expect(r"\$ ")
+        return term
+
+    def test_status_after_ctrl_c_is_130_and_after_ctrl_z_is_148(self):
+        term = self.start()
+        try:
+            term.line("sleep 7711")
+            time.sleep(0.4)
+            term.send(CTRL_C)
+            term.expect(r"\$ ")
+            term.line("echo STATUS=$?")
+            term.expect(r"\r\nSTATUS=130\r\n")
+            term.line("sleep 7712")
+            time.sleep(0.4)
+            term.send(CTRL_Z)
+            term.expect(r"Stopped")
+            term.line("echo STATUS=$?")
+            term.expect(r"\r\nSTATUS=148\r\n")
+            term.line("kill %1")
+            term.echoes("STILL_ALIVE_6")
+        finally:
+            term.close()
+            subprocess.run(["pkill", "-9", "-f", "sleep 771"])
+
+    def test_the_shell_exits_with_a_requested_status(self):
+        term = self.start()
+        term.line("exit 7")
+        self.assertEqual(term.wait_exit(), 7)
+        os.close(term.fd)
+
+    def test_the_shell_exits_with_the_status_of_the_last_command(self):
+        term = self.start()
+        term.line("false")
+        term.line("exit")
+        self.assertEqual(term.wait_exit(), 1)
+        os.close(term.fd)
+
+    def test_ctrl_d_at_an_empty_prompt_exits(self):
+        term = self.start()
+        term.send("\x04")
+        term.expect(r"exit")
+        self.assertEqual(term.wait_exit(), 0)
+        os.close(term.fd)
+
+    def test_history_is_saved_and_loaded_through_readlines_store(self):
+        first = self.start()
+        first.echoes("HIST_ONE")
+        first.line("echo HIST_TWO")
+        first.expect(r"\r\nHIST_TWO\r\n")
+        first.close()
+        with open(os.path.join(self.home.name, "history")) as f:
+            saved = f.read()
+        self.assertIn("echo HIST_ONE", saved)
+        self.assertIn("echo HIST_TWO", saved)
+
+        second = self.start()
+        try:
+            second.line("history")
+            second.expect(r"echo HIST_ONE")
+            second.expect(r"echo HIST_TWO")
+            # The up arrow walks back through the history: first this session's own `history`, then the
+            # entries that were loaded from the file ("exit", then "echo HIST_TWO").
+            for _ in range(3):
+                second.send("\x1b[A")
+                time.sleep(0.15)
+            second.send("\n")  # run the recalled command; readline only redraws changed characters on screen
+            second.expect(r"\r\nHIST_TWO\r\n")
+        finally:
+            second.close()
+
+    def test_a_command_can_continue_on_the_next_line(self):
+        term = self.start()
+        try:
+            term.line('echo "first')
+            term.expect(r"\r\n> ")  # the continuation prompt
+            term.line('second"')
+            term.expect(r"\r\nfirst\r\nsecond\r\n")
+            term.line("echo one |")
+            term.expect(r"\r\n> ")
+            term.line("cat")
+            term.expect(r"\r\none\r\n")
+        finally:
+            term.close()
+
+    def test_ctrl_c_cancels_a_command_that_was_being_continued(self):
+        term = self.start()
+        try:
+            term.line('echo "never printed')
+            term.expect(r"\r\n> ")
+            term.send(CTRL_C)
+            time.sleep(0.2)
+            term.echoes("BACK_TO_NORMAL")
+            self.assertNotIn("never printed\r\n", term.buf[term.buf.rfind("echo \"never") + 20:])
+        finally:
+            term.close()
+
+    def test_a_syntax_error_does_not_end_an_interactive_shell(self):
+        term = self.start()
+        try:
+            term.line("echo a | | echo b")
+            term.expect(r"syntax error near unexpected token `\|'")
+            term.line("echo STATUS=$?")
+            term.expect(r"\r\nSTATUS=2\r\n")
+            term.echoes("STILL_ALIVE_7")
+        finally:
+            term.close()
 
 
 if __name__ == "__main__":

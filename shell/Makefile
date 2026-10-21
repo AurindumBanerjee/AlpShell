@@ -2,7 +2,7 @@
 #
 #   make            build build/alpshell
 #   make asan       build build-asan/alpshell with AddressSanitizer + UBSan
-#   make test       build and run the unit tests and the script tests (see tests/)
+#   make test       build and run all tests: unit tests, script tests against bash, pty and fork-failure tests
 #   make test-asan  the same, using the sanitizer build
 #   make clean
 #
@@ -48,6 +48,8 @@ asan:
 test: $(TARGET) $(UNIT_BIN)
 	$(UNIT_BIN)
 	python3 tests/run_script_tests.py --shell $(TARGET)
+	python3 tests/pty_tests.py --shell $(TARGET)
+	python3 tests/fork_failure_test.py --shell $(TARGET)
 
 test-asan:
 	$(MAKE) BUILD=build-asan CXXFLAGS="-g -O1 $(SAN_FLAGS)" LDFLAGS="$(SAN_FLAGS)" test
