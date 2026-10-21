@@ -1,26 +1,35 @@
 #include "prompt.h"
 
-std::string get_prompt()
-{
-    char cwd[1024];
-    if (getcwd(cwd, sizeof(cwd)) == nullptr)
-    {
-        perror("getcwd() error");
-        return COLOR_RED "alpShell> " COLOR_RESET;
-    }
+#include <limits.h>
+#include <unistd.h>
 
-    const char *home = getenv("HOME");
-    std::string current_dir = cwd;
+#include <cstdlib>
+#include <cstring>
 
-    if (home)
-    {
-        size_t home_len = strlen(home);
-        if (current_dir.substr(0, home_len) == home)
-        {
-            current_dir.replace(0, home_len, "~");
+namespace {
+
+// \001 and \002 are readline's RL_PROMPT_START_IGNORE and RL_PROMPT_END_IGNORE.
+#define IGNORE_BEGIN "\001"
+#define IGNORE_END "\002"
+#define ESC_RESET IGNORE_BEGIN "\033[0m" IGNORE_END
+#define ESC_CYAN IGNORE_BEGIN "\033[36m" IGNORE_END
+#define ESC_GREEN_BOLD IGNORE_BEGIN "\033[32m\033[1m" IGNORE_END
+#define ESC_RED_BOLD IGNORE_BEGIN "\033[31m\033[1m" IGNORE_END
+
+}  // namespace
+
+std::string get_prompt(bool syntax_error) {
+    char cwd[PATH_MAX];
+    std::string dir = getcwd(cwd, sizeof cwd) != nullptr ? cwd : "?";
+
+    // Show the home directory as ~ (only for the directory itself or paths below it).
+    if (const char* home = std::getenv("HOME")) {
+        const std::size_t n = std::strlen(home);
+        if (n > 0 && dir.compare(0, n, home) == 0 && (dir.size() == n || dir[n] == '/')) {
+            dir.replace(0, n, "~");
         }
     }
-
-    // Directory in cyan, prompt symbol in green with bold
-    return COLOR_CYAN + current_dir + COLOR_RESET " " COLOR_GREEN BOLD "$ " COLOR_RESET;
+    return ESC_CYAN + dir + ESC_RESET " " + (syntax_error ? ESC_RED_BOLD : ESC_GREEN_BOLD) + "$ " ESC_RESET;
 }
+
+std::string get_continuation_prompt() { return "> "; }

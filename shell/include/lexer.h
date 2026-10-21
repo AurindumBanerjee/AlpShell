@@ -1,109 +1,62 @@
-// // // #ifndef LEXER_H
-// // // #define LEXER_H
-
-// // // #include <vector>
-// // // #include <string>
-
-// // // enum class TokenType {
-// // //     IDENTIFIER,
-// // //     NUMBER,
-// // //     PIPE,
-// // //     REDIRECT_OUT,
-// // //     REDIRECT_IN,
-// // //     END
-// // // };
-
-// // // struct Token {
-// // //     TokenType type;
-// // //     std::string value;
-// // // };
-
-// // // class Lexer {
-// // // public:
-// // //     std::vector<Token> tokenize(const std::string& input);
-// // // };
-
-// // // #endif
-
-// // #ifndef LEXER_H
-// // #define LEXER_H
-
-// // #include <vector>
-// // #include <string>
-
-// // enum class TokenType {
-// //     IDENTIFIER,
-// //     NUMBER, // Still unused? Consider removing if not planned.
-// //     PIPE,
-// //     REDIRECT_OUT,
-// //     REDIRECT_IN,
-// //     END
-// //     // Add other operators like >>, & if needed
-// // };
-
-// // // Define how a token was quoted (or not)
-// // enum class QuotingType {
-// //     NONE,         // No quotes
-// //     SINGLE,       // Enclosed in '...'
-// //     DOUBLE        // Enclosed in "..."
-// // };
-
-// // struct Token {
-// //     TokenType type;
-// //     std::string value;
-// //     QuotingType quoting = QuotingType::NONE; // Default to no quoting
-// // };
-
-// // class Lexer {
-// // public:
-// //     std::vector<Token> tokenize(const std::string& input);
-// // };
-
-// // #endif // LEXER_H
-
 #ifndef LEXER_H
 #define LEXER_H
 
-#include <vector>
+#include <cstddef>
 #include <string>
+#include <vector>
+
+// How a piece of a word was quoted. Expansion depends on it: nothing is expanded inside '...',
+// only variables are expanded inside "...", and unquoted text also gets globbing and field splitting.
+// Text produced by a backslash escape is stored as a Single part (literal).
+enum class Quote { None, Single, Double };
+
+struct WordPart {
+    std::string text;
+    Quote quote = Quote::None;
+};
+
+// A shell word is a sequence of parts, e.g. a"b c"'d' has three parts.
+using Word = std::vector<WordPart>;
 
 enum class TokenType {
-    IDENTIFIER,
-    NUMBER,
-    PIPE,
-    REDIRECT_OUT,   // For >
-    REDIRECT_IN,    // For <
-    REDIRECT_APPEND,// For >>  <--- ADD THIS
-    END
-    // Add other operators like & if needed
+    Word,
+    Pipe,           // |
+    And,            // &&
+    Or,             // ||
+    Semi,           // ;
+    Amp,            // &
+    RedirIn,        // <
+    RedirOut,       // > or 1>
+    RedirAppend,    // >> or 1>>
+    RedirErrOut,    // 2>
+    RedirErrAppend, // 2>>
+    RedirErrToOut,  // 2>&1
+    RedirOutToErr,  // >&2 or 1>&2
+    End
 };
 
-// Define how a token was quoted (or not)
-enum class QuotingType {
-    NONE,         // No quotes
-    SINGLE,       // Enclosed in '...'
-    DOUBLE        // Enclosed in "..."
+struct Token {
+    TokenType type = TokenType::End;
+    Word parts;                // Word tokens only
+    std::size_t start = 0;     // byte range [start, end) in the input
+    std::size_t end = 0;
+
+    // Operator spelling, or the word with quotes removed. Used in error messages.
+    std::string spelling() const;
 };
 
-enum class LexerState
-{
-    DEFAULT,
-    IN_SQUOTE,
-    IN_DQUOTE
-};
-
-struct Token
-{
-    TokenType type;
-    std::string value;
-    QuotingType quoting = QuotingType::NONE;
-    size_t start_pos = 0; // Add position tracking
-    size_t end_pos = 0;   // Add position tracking
+struct LexResult {
+    std::vector<Token> tokens;  // always ends with an End token when error is empty
+    std::string error;          // empty when the input was tokenized
+    bool incomplete = false;    // ended inside a quote or after a backslash: more input could complete it
+    bool ok() const { return error.empty(); }
 };
 
 class Lexer {
 public:
-    std::vector<Token> tokenize(const std::string& input);
+    // Splits one logical line. Comments (# at the start of a word) run to the end of the line.
+    // A backslash followed by a newline joins the lines.
+    LexResult tokenize(const std::string& input) const;
 };
 
 #endif // LEXER_H

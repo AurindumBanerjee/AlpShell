@@ -326,7 +326,20 @@ int wait_for(Job* j) {
             for (Process& pr : j->procs) pr.finished = true;
         }
     }
+    j->reported = JobState::Done;  // the user asked for this job: no "Done" notice later
     return j->exit_status();
+}
+
+void leave_job_control() {
+    g_enabled = false;
+    g_jobs.clear();
+}
+
+std::vector<Job*> background_jobs() {
+    std::vector<Job*> out;
+    for (Job& j : g_jobs)
+        if (!j.foreground) out.push_back(&j);
+    return out;
 }
 
 void notify() {

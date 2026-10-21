@@ -3,10 +3,10 @@
 
 #include <sys/types.h>
 
+#include <functional>
 #include <string>
+#include <utility>
 #include <vector>
-
-#include "command.h"
 
 enum class RedirOp {
     In,         // < path
@@ -27,6 +27,8 @@ struct ResolvedRedir {
 struct ProcessSpec {
     std::vector<std::string> argv;
     std::vector<ResolvedRedir> redirs;
+    std::vector<std::pair<std::string, std::string>> env;  // NAME=value, for this command only
+    std::function<int()> builtin;  // when set, run in the forked child instead of exec'ing argv; returns the status
 };
 
 struct PipelineResult {
@@ -39,13 +41,25 @@ struct PipelineResult {
 // Starts the processes of a pipeline connected by pipes. Each pipeline gets its own process group when job
 // control is on. A foreground pipeline gets the terminal and is waited for; a background one is only
 // recorded in the job table (with `text` as its description).
-PipelineResult runPipeline(const std::vector<ProcessSpec>& procs, bool background, const std::string& text);
+PipelineResult launchPipeline(const std::vector<ProcessSpec>& procs, bool background, const std::string& text);
 
 // Opens files and rewires stdin/stdout/stderr as the redirections say. Prints a message and returns false
 // if a file cannot be opened.
 bool applyRedirections(const std::vector<ResolvedRedir>& redirs);
 
-// Runs a parsed pipeline of Command objects (converts them to ProcessSpecs).
-PipelineResult executePipeline(const std::vector<Command>& commands, bool background, const std::string& text);
+// Applies redirections in the current process (for a builtin that runs inside the shell) and puts the
+// original descriptors back when it goes out of scope.
+class RedirectionScope {
+public:
+    explicit RedirectionScope(const std::vector<ResolvedRedir>& redirs);
+    ~RedirectionScope();
+    RedirectionScope(const RedirectionScope&) = delete;
+    RedirectionScope& operator=(const RedirectionScope&) = delete;
+    bool ok() const { return ok_; }
+
+private:
+    int saved_[3];
+    bool ok_;
+};
 
 #endif // EXECUTOR_H

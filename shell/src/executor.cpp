@@ -68,6 +68,8 @@ int openFor(const ResolvedRedir& r) {
         close(fds[1]);
     }
     if (!applyRedirections(spec.redirs)) _exit(1);
+    for (const auto& assignment : spec.env) setenv(assignment.first.c_str(), assignment.second.c_str(), 1);
+    if (spec.builtin) _exit(spec.builtin() & 0xFF);  // a builtin inside a pipeline runs in the child
     if (spec.argv.empty()) _exit(0);
 
     std::vector<char*> args;
@@ -113,7 +115,7 @@ bool applyRedirections(const std::vector<ResolvedRedir>& redirs) {
     return true;
 }
 
-PipelineResult runPipeline(const std::vector<ProcessSpec>& procs, bool background, const std::string& text) {
+PipelineResult launchPipeline(const std::vector<ProcessSpec>& procs, bool background, const std::string& text) {
     PipelineResult result;
     const size_t n = procs.size();
     if (n == 0) return result;
@@ -163,15 +165,15 @@ PipelineResult runPipeline(const std::vector<ProcessSpec>& procs, bool backgroun
     return result;
 }
 
-PipelineResult executePipeline(const std::vector<Command>& commands, bool background, const std::string& text) {
-    std::vector<ProcessSpec> specs;
-    for (const Command& c : commands) {
-        ProcessSpec s;
-        s.argv.push_back(c.executable);
-        s.argv.insert(s.argv.end(), c.arguments.begin(), c.arguments.end());
-        if (!c.inputFile.empty()) s.redirs.push_back({RedirOp::In, c.inputFile});
-        if (!c.outputFile.empty()) s.redirs.push_back({c.appendOutput ? RedirOp::Append : RedirOp::Out, c.outputFile});
-        specs.push_back(std::move(s));
+RedirectionScope::RedirectionScope(const std::vector<ResolvedRedir>& redirs) {
+    for (int fd = 0; fd < 3; ++fd) saved_[fd] = fcntl(fd, F_DUPFD_CLOEXEC, 10);
+    ok_ = applyRedirections(redirs);
+}
+
+RedirectionScope::~RedirectionScope() {
+    for (int fd = 0; fd < 3; ++fd) {
+        if (saved_[fd] < 0) continue;
+        dup2(saved_[fd], fd);
+        close(saved_[fd]);
     }
-    return runPipeline(specs, background, text);
 }

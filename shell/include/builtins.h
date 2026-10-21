@@ -4,12 +4,18 @@
 #include <string>
 #include <vector>
 
-// Builtins that run inside the shell process because they act on the shell's own state.
+class Shell;
 
-// True for the builtins that deal with jobs: jobs, fg, bg, kill.
-bool isJobBuiltin(const std::string& name);
+// Builtins: cd pwd echo export unset exit history wait jobs fg bg kill.
+// They run inside the shell process, because they act on the shell's own state, except when they are part of
+// a pipeline or run in the background: then they run in a forked child like any other command.
 
-// Runs one of them. argv[0] is the builtin's name. Returns its exit status.
-int runJobBuiltin(const std::vector<std::string>& argv);
+bool isBuiltin(const std::string& name);
+
+// The names of all builtins (used by tab completion).
+const std::vector<std::string>& builtinNames();
+
+// Runs a builtin. argv[0] is its name. Returns its exit status.
+int runBuiltin(Shell& shell, const std::vector<std::string>& argv);
 
 #endif // BUILTINS_H

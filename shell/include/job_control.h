@@ -71,8 +71,13 @@ void put_in_background(Job* job, bool cont);
 
 // Collects the state changes of all background jobs without blocking.
 void reap();
-// Blocks until the job has finished (used by `wait`). Does not report stops.
+// Blocks until the job has finished (used by `wait`). Does not report stops. A job that was waited for is
+// not announced again by notify().
 int wait_for(Job* job);
+// For a forked subshell: it has no jobs and no terminal control of its own.
+void leave_job_control();
+// Jobs that are not in the foreground (what `wait` waits for).
+std::vector<Job*> background_jobs();
 // Prints "Done" / "Stopped" notices for jobs whose state changed since the last notice, and drops the
 // finished ones. Called before each prompt. Silent unless job control is on.
 void notify();
