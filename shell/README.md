@@ -33,9 +33,21 @@ echo 'ls | wc -l' | ./build/alpshell
 | `main.cpp` | startup, readline loop, line processing, completion |
 | `src/lexer.cpp` | splits a line into word, pipe and redirection tokens, tracking quoting |
 | `src/parser.cpp` | builds commands from tokens and expands variables and globs |
-| `src/executor.cpp` | forks and wires up pipelines |
-| `src/job_control.cpp` | background job table and the `SIGCHLD` handler |
+| `src/executor.cpp` | forks the processes of a pipeline, wires up pipes and redirections |
+| `src/job_control.cpp` | job table, process groups, terminal hand-off, waiting and notices |
+| `src/builtins.cpp` | `jobs`, `fg`, `bg`, `kill` |
 | `src/history.cpp` | in-memory history list used by the `history` builtin |
 | `src/prompt.cpp` | colored prompt |
 | `src/syntax_highlight.cpp` | marks the prompt red when the line has a syntax problem |
 | `src/shell.cpp`, `src/util.cpp` | unused stubs |
+| `tests/pty_tests.py` | job control on a pseudo-terminal: Ctrl+C, Ctrl+Z, `fg`, `bg`, `kill`, job notices |
+| `tests/fork_failure_test.py`, `tests/failfork.c` | makes one `fork` or `pipe` fail and checks the cleanup |
+
+## Tests
+
+```bash
+python3 tests/pty_tests.py --shell build/alpshell            # job control on a pseudo-terminal
+python3 tests/fork_failure_test.py --shell build/alpshell    # needs a C compiler for tests/failfork.c
+```
+
+Both also work against `build-asan/alpshell` (set `ASAN_OPTIONS=detect_leaks=0`).

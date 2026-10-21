@@ -31,6 +31,7 @@ extern "C"
 #include "command.h"
 #include "executor.h"
 #include "job_control.h"
+#include "builtins.h"
 #include "history.h"
 #include "prompt.h"
 #include "syntax_highlight.h"
@@ -146,6 +147,32 @@ static char** completion_callback(const char *text, int start, int /*end*/) {
     // return nullptr;
 }
 
+// Ctrl+C while a line is being edited: drop the line and show a fresh prompt (the shell is not killed).
+static void onSigintAtPrompt(int)
+{
+    const char newline = '\n';
+    ssize_t ignored = write(STDOUT_FILENO, &newline, 1);
+    (void)ignored;
+    rl_replace_line("", 0);
+    rl_on_new_line();
+    rl_redisplay();
+}
+
+// readline() with SIGINT turned into "cancel this line". At every other time the shell ignores SIGINT.
+static char* readLineInterruptible(const char* prompt)
+{
+    if (!JobControl::enabled()) return readline(prompt);
+    struct sigaction handler;
+    struct sigaction previous;
+    handler.sa_handler = onSigintAtPrompt;
+    sigemptyset(&handler.sa_mask);
+    handler.sa_flags = SA_RESTART;
+    sigaction(SIGINT, &handler, &previous);
+    char* line = readline(prompt);
+    sigaction(SIGINT, &previous, nullptr);
+    return line;
+}
+
 // Function to process a single line of command input
 // Returns true to continue, false to exit
 bool process_line(const std::string& line, bool is_interactive) {
@@ -192,10 +219,6 @@ bool process_line(const std::string& line, bool is_interactive) {
     // but we can leave them for now.
     if (is_interactive && line == "history") {
         History::printHistory();
-        return true;
-    }
-    if (line == "jobs") { // jobs can be useful even in scripts sometimes
-        JobControl::listJobs();
         return true;
     }
 
@@ -245,6 +268,15 @@ bool process_line(const std::string& line, bool is_interactive) {
         return true; // Continue after cd attempt
     }
 
+    // --- Job builtins: jobs, fg, bg, kill ---
+    if (commands.size() == 1 && isJobBuiltin(commands[0].executable)) {
+        std::vector<std::string> argv;
+        argv.push_back(commands[0].executable);
+        argv.insert(argv.end(), commands[0].arguments.begin(), commands[0].arguments.end());
+        runJobBuiltin(argv);
+        return true;
+    }
+
 
     // // --- Background Execution Check ---
     // bool runInBackground = false;
@@ -289,25 +321,23 @@ bool process_line(const std::string& line, bool is_interactive) {
 
 
     // --- Execute the pipeline ---
-    pid_t last_pid = executePipeline(commands, runInBackground);
-
-
-    // --- Add job to job control if running in background ---
-    // Background jobs are usually allowed in scripts too
-    if (runInBackground && last_pid > 0) {
-        JobControl::addJob(last_pid, line);
-        // Optionally suppress this message in non-interactive mode
-        if (is_interactive) {
-             std::cout << "Started background job [" << last_pid << "]" << std::endl;
-        }
-    } else if (runInBackground && last_pid == 0) {
-         std::cerr << "Failed to start background job." << std::endl;
-         // Decide script behavior: continue or exit?
-         // return false; // Optionally exit script on background failure
+    // The job description is the line without its trailing '&'.
+    std::string job_text = original_trimmed;
+    if (runInBackground) {
+        job_text.pop_back();
+        size_t keep = job_text.find_last_not_of(" \t");
+        job_text = keep == std::string::npos ? "" : job_text.substr(0, keep + 1);
     }
+    PipelineResult result = executePipeline(commands, runInBackground, job_text);
 
-    // If a foreground command failed, should the script exit?
-    // Standard shells often have `set -e` for this. We don't implement that yet.
+    if (runInBackground && result.launched) {
+        Job* job = JobControl::find_by_pid(result.last_pid);
+        if (is_interactive && job != nullptr) {
+            std::cout << "[" << job->id << "] " << result.last_pid << std::endl;
+        }
+    } else if (runInBackground) {
+        std::cerr << "Failed to start background job." << std::endl;
+    }
 
     return true; // Continue processing
 }
@@ -346,9 +376,9 @@ int main(int argc, char *argv[])
     // rl_redisplay_hook = redisplay_hook;
     rl_char_is_quoted_p = reinterpret_cast<rl_linebuf_func_t *>(&is_quoted);
 
-    // Then prepare terminal
-    rl_prep_terminal(1); // Must come after stream assignments
-    rl_set_signals();
+    // Readline must not install its own signal handlers: the shell ignores SIGINT/SIGTSTP/SIGTTIN/SIGTTOU
+    // itself (see JobControl::init), except for SIGINT while a line is being edited (readLineInterruptible).
+    rl_catch_signals = 0;
 
     // // Create debug log file
     // int log_fd = open("debug.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -372,9 +402,6 @@ int main(int argc, char *argv[])
     setenv("CLICOLOR", "1", 1);
     setenv("CLICOLOR_FORCE", "1", 1);
 
-    // Setup signal handler for job control (needed in both modes)
-    JobControl::setupSignalHandlers();
-
     bool is_interactive = false;
     std::istream* input_stream = &std::cin; // Default to stdin
     std::ifstream script_file;
@@ -397,6 +424,9 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
+    // Job control (process groups, terminal hand-off) only exists for an interactive shell.
+    JobControl::init(is_interactive);
+
     // --- Main Processing Loop ---
     std::string line;
     char* read_buffer = nullptr; // Only for readline
@@ -408,7 +438,9 @@ int main(int argc, char *argv[])
                 free(read_buffer);
                 read_buffer = nullptr;
             }
-            read_buffer = readline(get_prompt().c_str()); // Dynamic prompt
+            JobControl::reap();    // collect finished or stopped background jobs ...
+            JobControl::notify();  // ... and tell the user before the prompt
+            read_buffer = readLineInterruptible(get_prompt().c_str()); // Dynamic prompt
             if (read_buffer == nullptr) { // EOF (Ctrl+D)
                 std::cout << std::endl;
                 break;
@@ -429,6 +461,8 @@ int main(int argc, char *argv[])
              if (!process_line(line, is_interactive)) {
                  break; // process_line returned false (e.g., exit command)
             }
+            JobControl::reap();    // scripts: collect finished background jobs, silently
+            JobControl::notify();
         }
          // Check for errors reading from the file stream if needed
          // if (input_stream->bad()) { ... }
