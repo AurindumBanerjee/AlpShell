@@ -177,7 +177,9 @@ bool process_line(const std::string& line, bool is_interactive) {
 
     if (line == "ls")
     {
-        system("ls --color=auto");
+        if (system("ls --color=auto") != 0) {
+            // ls prints its own error message
+        }
         return true;
     }
 

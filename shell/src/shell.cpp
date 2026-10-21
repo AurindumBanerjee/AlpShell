@@ -7,7 +7,7 @@ void AlpShell::alp_loop(){
 
 // loop with arguments
 void AlpShell::alp_loop(char **flags){
-
+  (void)flags;
 }
 
 // method for prompt

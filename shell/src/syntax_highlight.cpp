@@ -59,7 +59,7 @@ int is_quoted(char *text, int index) // Match readline's expected signature
     for (const auto &token : tokens)
     {
         if ((token.quoting == QuotingType::SINGLE || token.quoting == QuotingType::DOUBLE) &&
-            index >= token.start_pos && index <= token.end_pos)
+            index >= 0 && static_cast<size_t>(index) >= token.start_pos && static_cast<size_t>(index) <= token.end_pos)
         {
             return 1;
         }

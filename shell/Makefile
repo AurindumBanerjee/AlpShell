@@ -1,43 +1,58 @@
-#Compiler
-CXX = g++
+# AlpShell build.
+#
+#   make            build build/alpshell
+#   make asan       build build-asan/alpshell with AddressSanitizer + UBSan
+#   make test       build and run the unit tests and the script tests (see tests/)
+#   make test-asan  the same, using the sanitizer build
+#   make clean
+#
+# Sources are discovered with a wildcard, and -MMD/-MP make every object depend on the headers it
+# includes, so editing a header rebuilds exactly the files that use it.
 
-#DIRS
-SRC_DIR = src
-INCLUDE_DIR = include
-BUILD_DIR = build
+CXX      ?= g++
+CXXSTD   := -std=c++17
+WARNINGS := -Wall -Wextra
+CPPFLAGS += -Iinclude -MMD -MP
+CXXFLAGS ?= -g -O2
+LDLIBS   += -lreadline
 
-#Flags
-CXXFLAGS = -Wall -g -std=c++11 -I$(INCLUDE_DIR)
+BUILD  ?= build
+TARGET := $(BUILD)/alpshell
 
-LIBS = -lreadline
+LIB_SRCS  := $(wildcard src/*.cpp)
+LIB_OBJS  := $(LIB_SRCS:%.cpp=$(BUILD)/%.o)
+MAIN_OBJ  := $(BUILD)/main.o
+UNIT_OBJ  := $(BUILD)/tests/unit_tests.o
+UNIT_BIN  := $(BUILD)/unit_tests
+DEPS      := $(LIB_OBJS:.o=.d) $(MAIN_OBJ:.o=.d) $(UNIT_OBJ:.o=.d)
 
-#Objs
-OBJS = main.o $(SRC_DIR)/command.o $(SRC_DIR)/executor.o $(SRC_DIR)/history.o $(SRC_DIR)/job_control.o $(SRC_DIR)/lexer.o $(SRC_DIR)/parser.o $(SRC_DIR)/shell.o $(SRC_DIR)/util.o $(SRC_DIR)/prompt.o
+SAN_FLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined
 
-#Target
-TARGET = $(BUILD_DIR)/alpshell
+.PHONY: all asan test test-asan clean
 
-#all-rule
 all: $(TARGET)
 
-#Linking
-$(TARGET): $(OBJS)
-	$(CXX) $(OBJS) -o $@ $(CXXFLAGS) $(LIBS)
+$(TARGET): $(MAIN_OBJ) $(LIB_OBJS)
+	$(CXX) $^ -o $@ $(LDFLAGS) $(LDLIBS)
 
-#Compiling
-main.o: $(INCLUDE_DIR)/prompt.h $(INCLUDE_DIR)/lexer.h $(INCLUDE_DIR)/parser.h $(INCLUDE_DIR)/command.h $(INCLUDE_DIR)/executor.h $(INCLUDE_DIR)/job_control.h $(INCLUDE_DIR)/history.h 
-$(SRC_DIR)/prompt.o: $(INCLUDE_DIR)/prompt.h
-$(SRC_DIR)/syntax_highlight.o: $(INCLUDE_DIR)/syntax_highlight.h
-$(SRC_DIR)/shell.o: $(INCLUDE_DIR)/parser.h $(INCLUDE_DIR)/util.h $(INCLUDE_DIR)/shell.h
-$(SRC_DIR)/parser.o: $(INCLUDE_DIR)/lexer.h $(INCLUDE_DIR)/parser.h
-$(SRC_DIR)/executor.o: $(INCLUDE_DIR)/command.h $(INCLUDE_DIR)/executor.h
-$(SRC_DIR)/command.o: $(INCLUDE_DIR)/command.h
-$(SRC_DIR)/history.o: $(INCLUDE_DIR)/history.h
-$(SRC_DIR)/job_control.o: $(INCLUDE_DIR)/job_control.h
-$(SRC_DIR)/util.o: $(INCLUDE_DIR)/util.h
-$(SRC_DIR)/lexer.o: $(INCLUDE_DIR)/lexer.h
-# clean-rule
-.PHONY: clean
+$(BUILD)/%.o: %.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CPPFLAGS) $(CXXSTD) $(WARNINGS) $(CXXFLAGS) -c $< -o $@
+
+$(UNIT_BIN): $(UNIT_OBJ) $(LIB_OBJS)
+	$(CXX) $^ -o $@ $(LDFLAGS) $(LDLIBS)
+
+asan:
+	$(MAKE) BUILD=build-asan CXXFLAGS="-g -O1 $(SAN_FLAGS)" LDFLAGS="$(SAN_FLAGS)" all
+
+test: $(TARGET) $(UNIT_BIN)
+	$(UNIT_BIN)
+	python3 tests/run_script_tests.py --shell $(TARGET)
+
+test-asan:
+	$(MAKE) BUILD=build-asan CXXFLAGS="-g -O1 $(SAN_FLAGS)" LDFLAGS="$(SAN_FLAGS)" test
 
 clean:
-	rm -rf $(OBJS) $(TARGET)
+	rm -rf build build-asan
+
+-include $(DEPS)
