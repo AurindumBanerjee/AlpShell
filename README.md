@@ -92,7 +92,7 @@ cmake --build build-cmake
 
 ```bash
 cd shell
-make test          # unit tests, script tests against bash, pty tests, fork-failure tests
+make test          # unit, script (against bash), command-line, pty and fork-failure tests
 make test-asan     # the same on the sanitizer build
 ctest --test-dir build-cmake --output-on-failure   # the same through CMake
 ```
@@ -101,9 +101,10 @@ ctest --test-dir build-cmake --output-on-failure   # the same through CMake
 * **Script tests** (`tests/script_cases.txt`): each case runs under `bash` and under `alpshell`, non-interactively, and
   stdout, stderr and the exit status must match. Intentional differences are listed in the case file with the
   output AlpShell is expected to produce. Needs `bash` and `python3`.
+* **Command-line tests** (`tests/cli_test.py`): `-c`, script files, commands on stdin, exit codes, usage errors.
 * **Pty tests** (`tests/pty_tests.py`): the shell on a pseudo-terminal: Ctrl+C, Ctrl+Z, `fg`, `bg`, `kill`, job
-  notices, `$?` after a signal, history, continuation lines, exit codes. They also look at the real process state
-  in `/proc`.
+  notices, `$?` after a signal, history, continuation lines, Tab completion, the red `$`, exit codes. They also
+  look at the real process state in `/proc`.
 * **Fork-failure tests** (`tests/fork_failure_test.py`): an `LD_PRELOAD` shim makes one `fork` or `pipe` call fail and
   checks that the processes already started are killed and reaped.
 
@@ -122,7 +123,8 @@ drivers/ kernel/ userland/    empty placeholders for a possible OS project
 
 `bootloader/`, `drivers/`, `kernel/` and `userland/` are **not part of the shell** and are not built or tested.
 `bootloader/src/main.asm` is a boot-sector experiment assembled with `nasm`; `drivers/`, `kernel/` and `userland/`
-contain only empty READMEs. `bootloader/main.asm` is an older, separate draft that does not assemble correctly.
+contain only empty READMEs. `bootloader/main.asm` is an older, separate draft whose code looks broken (for example `jmp.loop` jumps over the
+character-printing instructions); nothing here has been assembled or run.
 
 ## Authors
 

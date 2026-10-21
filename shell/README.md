@@ -11,7 +11,7 @@ uses `fork`, `exec`, `termios` and `glob(3)`. The tests also need `python3` and 
 |---|---|
 | `make` | `build/alpshell`, built with `-std=c++17 -Wall -Wextra` |
 | `make asan` | `build-asan/alpshell`, built with AddressSanitizer and UBSan |
-| `make test` | builds, then runs the unit, script, pty and fork-failure tests |
+| `make test` | builds, then runs the unit, script, command-line, pty and fork-failure tests |
 | `make test-asan` | the same tests against the sanitizer build |
 | `make clean` | removes `build/` and `build-asan/` |
 | `cmake -S . -B build-cmake && cmake --build build-cmake` | the same program through CMake |
@@ -52,7 +52,8 @@ echo 'ls | wc -l' | ./build/alpshell
 |---|---|
 | `tests/unit_tests.cpp` | lexer, parser, expansion and variables (a tiny built-in test runner) |
 | `tests/script_cases.txt`, `tests/run_script_tests.py` | scripts run under `bash` and `alpshell` must agree on stdout, stderr and exit status; intentional differences are declared with a reason |
-| `tests/pty_tests.py` | interactive behaviour on a pseudo-terminal: Ctrl+C, Ctrl+Z, `fg`, `bg`, `kill`, notices, history, continuation lines, exit codes |
+| `tests/cli_test.py` | `-c`, script files, commands on stdin, exit codes and usage errors |
+| `tests/pty_tests.py` | interactive behaviour on a pseudo-terminal: Ctrl+C, Ctrl+Z, `fg`, `bg`, `kill`, notices, history, continuation lines, Tab completion, the red `$`, exit codes |
 | `tests/fork_failure_test.py`, `tests/failfork.c` | one `fork` or `pipe` call fails (via `LD_PRELOAD`); the processes already started must be killed and reaped |
 
 Run one test file directly, for example `python3 tests/pty_tests.py --shell build/alpshell`, or only matching
