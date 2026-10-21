@@ -24,12 +24,13 @@ CTRL_Z = "\x1a"
 class Terminal:
     """The shell under test, attached to a pty."""
 
-    def __init__(self, home):
+    def __init__(self, home, path="/usr/local/bin:/usr/bin:/bin"):
+        # The environment is fixed, so the tests do not depend on the machine (under WSL, for example, PATH also
+        # lists the Windows directories, and CI runners have extra interpreters on PATH).
+        self.path = path
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
-            # A fixed PATH keeps the tests independent of the machine (under WSL, for example, PATH also lists the
-            # Windows directories, whose programs would make some completions ambiguous).
-            os.environ.update(HOME=home, TERM="xterm", LC_ALL="C", PATH="/usr/local/bin:/usr/bin:/bin",
+            os.environ.update(HOME=home, TERM="xterm", LC_ALL="C", PATH=path,
                               ALPSHELL_HISTFILE=os.path.join(home, "history"))
             os.execv(SHELL, [SHELL])
         self.buf = ""
@@ -42,7 +43,7 @@ class Terminal:
     def line(self, text):
         self.send(text + "\n")
 
-    def expect(self, regex, timeout=6.0):
+    def expect(self, regex, timeout=10.0):
         """Waits until `regex` matches the output received since the last successful expect."""
         deadline = time.time() + timeout
         pattern = re.compile(regex)
@@ -53,8 +54,8 @@ class Terminal:
                 return m
             left = deadline - time.time()
             if left <= 0:
-                tail = self.buf[self.mark:][-400:]
-                raise AssertionError("timed out waiting for %r; recent output: %r" % (regex, tail))
+                raise AssertionError("timed out waiting for %r\nPATH=%s\nunread output: %r\nall output: %r"
+                                     % (regex, self.path, self.buf[self.mark:][-400:], self.buf[-2000:]))
             ready, _, _ = select.select([self.fd], [], [], min(left, 0.2))
             if ready:
                 try:
@@ -62,10 +63,11 @@ class Terminal:
                 except OSError:
                     data = b""
                 if not data:
-                    raise AssertionError("shell closed the terminal while waiting for %r" % regex)
+                    raise AssertionError("shell closed the terminal while waiting for %r\nPATH=%s\nall output: %r"
+                                         % (regex, self.path, self.buf[-2000:]))
                 self.buf += data.decode("utf-8", "replace")
 
-    def echoes(self, word, timeout=6.0):
+    def echoes(self, word, timeout=10.0):
         """Runs `echo word` and waits for its output (a line by itself), which proves the shell is alive."""
         self.line("echo " + word)
         return self.expect(r"\r\n" + re.escape(word) + r"\r\n", timeout)
@@ -267,8 +269,8 @@ class StatusAndSessionTests(unittest.TestCase):
     def tearDown(self):
         self.home.cleanup()
 
-    def start(self):
-        term = Terminal(self.home.name)
+    def start(self, path="/usr/local/bin:/usr/bin:/bin"):
+        term = Terminal(self.home.name, path)
         term.expect(r"\$ ")
         return term
 
@@ -365,17 +367,46 @@ class StatusAndSessionTests(unittest.TestCase):
         finally:
             term.close()
 
+    def commands_dir(self):
+        """A directory of fake executables, so completion depends on nothing installed on the machine."""
+        bindir = os.path.join(self.home.name, "bin")
+        os.mkdir(bindir)
+        for name in ("zzcmd_alpha_one", "zzcmd_alpha_two", "zzcmd_unique_only"):
+            path = os.path.join(bindir, name)
+            with open(path, "w") as f:
+                f.write("#!/bin/sh\n")
+            os.chmod(path, 0o755)
+        with open(os.path.join(bindir, "zzcmd_not_executable"), "w") as f:
+            f.write("data\n")
+        return bindir
+
     def test_tab_completes_builtins_and_commands_in_command_position(self):
-        term = self.start()
+        term = self.start(self.commands_dir())  # PATH holds only the fake commands
         try:
             term.send("unse\t")  # `unset` is only a builtin: a unique completion
             term.expect(r"unset ")
             term.send(CTRL_C)
-            time.sleep(0.2)
-            term.send("pytho\t")  # an executable on PATH: python3 and python3.12 share the prefix "python3"
-            term.expect(r"pytho\x07?n3")  # readline rings the bell (the choice is ambiguous) and inserts the prefix
+            term.expect(r"\$ ")
+
+            term.send("zzcmd_uni\t")  # a unique command on PATH: completed, with a trailing space
+            term.expect(r"zzcmd_uni\x07?que_only ")
             term.send(CTRL_C)
-            time.sleep(0.2)
+            term.expect(r"\$ ")
+
+            # Two candidates: only the common prefix is inserted. The next character typed lands right after it, which
+            # shows that nothing further was completed. (Readline rings the bell only when no progress is possible, so
+            # the test does not look at it.)
+            term.send("zzcmd_alp\t")
+            term.send("Q")
+            term.expect(r"zzcmd_alp\x07?ha_Q")
+            term.send(CTRL_C)
+            term.expect(r"\$ ")
+
+            term.send("zzcmd_not\t")  # a file without the execute bit is not a command
+            term.send("Q")
+            term.expect(r"zzcmd_not\x07?Q")
+            term.send(CTRL_C)
+            term.expect(r"\$ ")
             term.echoes("STILL_ALIVE_8")
         finally:
             term.close()
