@@ -34,3 +34,17 @@
 shell/build
 build
 .vscode
+# Build outputs
+build/
+build-*/
+shell/build/
+shell/build-*/
+*.d
+*.bin
+*.img
+
+# Editors and local state
+.vscode/
+.alpshell_history
+__pycache__/
+*.pyc

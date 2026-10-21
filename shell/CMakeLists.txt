@@ -1,33 +1,49 @@
 cmake_minimum_required(VERSION 3.10)
-project(alpshell)
+project(alpshell CXX)
 
-# Set C++ standard
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE RelWithDebInfo)
+endif()
 
-# Output directory for build
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+option(ALPSHELL_SANITIZE "Build with AddressSanitizer and UBSan" OFF)
 
-# Include directory
-include_directories(include)
+# GNU readline: the header and the library are both required.
+find_path(READLINE_INCLUDE_DIR readline/readline.h)
+find_library(READLINE_LIBRARY readline)
+if(NOT READLINE_INCLUDE_DIR OR NOT READLINE_LIBRARY)
+  message(FATAL_ERROR "GNU readline not found (Debian/Ubuntu: apt install libreadline-dev)")
+endif()
 
-# Source files
-set(SOURCES
-    main.cpp
-    src/prompt.cpp
-    src/command.cpp
-    src/executor.cpp
-    src/history.cpp
-    src/job_control.cpp
-    src/lexer.cpp
-    src/parser.cpp
-    src/shell.cpp
-    src/util.cpp
-    src/syntax_highlight.cpp
-)
+file(GLOB ALPSHELL_LIB_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
 
-# Add executable
-add_executable(alpshell ${SOURCES})
+add_library(alpshell_core STATIC ${ALPSHELL_LIB_SOURCES})
+target_include_directories(alpshell_core PUBLIC include ${READLINE_INCLUDE_DIR})
+target_link_libraries(alpshell_core PUBLIC ${READLINE_LIBRARY})
+target_compile_options(alpshell_core PUBLIC -Wall -Wextra)
+if(ALPSHELL_SANITIZE)
+  target_compile_options(alpshell_core PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer
+                                               -fno-sanitize-recover=undefined)
+  target_link_options(alpshell_core PUBLIC -fsanitize=address,undefined)
+endif()
 
-# Link libraries
-target_link_libraries(alpshell readline)
+add_executable(alpshell main.cpp)
+target_link_libraries(alpshell PRIVATE alpshell_core)
+
+# Unit tests and script tests (only once tests/ exists).
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/unit_tests.cpp)
+  enable_testing()
+  add_executable(unit_tests tests/unit_tests.cpp)
+  target_link_libraries(unit_tests PRIVATE alpshell_core)
+  add_test(NAME unit_tests COMMAND unit_tests)
+  find_package(Python3 COMPONENTS Interpreter)
+  if(Python3_FOUND)
+    foreach(py_test run_script_tests cli_test pty_tests fork_failure_test)
+      add_test(NAME ${py_test}
+               COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/${py_test}.py
+                       --shell $<TARGET_FILE:alpshell>)
+    endforeach()
+  endif()
+endif()

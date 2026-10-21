@@ -1,93 +1,57 @@
-// filepath: /home/laksh/repos/AlpsOS/shell/src/syntax_highlight.cpp
-#include "lexer.h"
 #include "syntax_highlight.h"
+
+#include <cstdio>
+#include <cstdlib>
+
+extern "C" {
+#include <readline/readline.h>
+}
+
+#include "lexer.h"
+#include "parser.h"
 #include "prompt.h"
-extern "C"
-{
-    #include <readline/readline.h>
-    #include <readline/history.h>
-}
-#include <string>
-#include <vector>
-#include <cstdlib> // For free()
 
-// Ensure non-printing chars are properly escaped
-// Update color definitions with proper Readline escaping
-#define ERROR_COLOR "\001\033[1;31m\002"  // Red (bold)
-#define PROMPT_COLOR "\001\033[1;34m\002" // Blue (bold)
-#define RESET_COLOR "\001\033[0m\002"
-
-// Check for syntax errors in the input line
-int check_syntax(const char *line)
-{
-    Lexer lexer;
-    std::vector<Token> tokens = lexer.tokenize(line);
-
-    // Check for multiple error conditions
-    bool in_quote = false;
-    bool has_pipe_error = false;
-    bool has_redirect_error = false;
-
-    for (const auto &token : tokens)
-    {
-        // Unterminated quotes
-        if (token.quoting != QuotingType::NONE)
-            in_quote = !in_quote;
-
-        // Check for pipe errors
-        if (token.type == TokenType::PIPE && tokens.size() == 1)
-            has_pipe_error = true;
-
-        // Check for invalid redirects
-        if ((token.type == TokenType::REDIRECT_IN ||
-             token.type == TokenType::REDIRECT_OUT) &&
-            (&token == &tokens.back()))
-            has_redirect_error = true;
-    }
-
-    return in_quote || has_pipe_error || has_redirect_error ||
-           (tokens.empty() && !std::string(line).empty());
+namespace {
+bool g_enabled = false;
 }
 
-// Check if a character is within quotes
-int is_quoted(char *text, int index) // Match readline's expected signature
-{
-    const std::string str(text); // Create const copy
-    Lexer lexer;
-    std::vector<Token> tokens = lexer.tokenize(str);
+void set_syntax_highlight(bool enabled) { g_enabled = enabled; }
 
-    for (const auto &token : tokens)
-    {
-        if ((token.quoting == QuotingType::SINGLE || token.quoting == QuotingType::DOUBLE) &&
-            index >= token.start_pos && index <= token.end_pos)
-        {
-            return 1;
+bool line_has_syntax_error(const std::string& line) {
+    const LexResult lexed = Lexer().tokenize(line);
+    if (!lexed.ok()) return true;
+    return !Parser().parse(lexed.tokens, line).ok();
+}
+
+// Is the character at `index` inside quotes or escaped by a backslash? (readline uses this so that it does
+// not treat a space or operator inside quotes as a word break.)
+int is_quoted(char* text, int index) {
+    bool single = false;
+    bool dbl = false;
+    for (int i = 0; i < index && text[i] != '\0'; ++i) {
+        const char c = text[i];
+        if (single) {
+            if (c == '\'') single = false;
+        } else if (c == '\\') {
+            if (i + 1 == index) return 1;  // the character at `index` is escaped
+            ++i;
+        } else if (dbl) {
+            if (c == '"') dbl = false;
+        } else if (c == '\'') {
+            single = true;
+        } else if (c == '"') {
+            dbl = true;
         }
     }
-    return 0;
+    return single || dbl ? 1 : 0;
 }
 
-// Hook to redisplay the prompt with syntax highlighting
-// filepath: /home/laksh/repos/AlpsOS/shell/src/syntax_highlight.cpp
-extern "C" void redisplay_hook()
-{
-    char *line = rl_copy_text(0, rl_end);
-    int syntax_error = check_syntax(line);
-    free(line);
-
-    std::string base_prompt = get_prompt();
-    size_t dollar_pos = base_prompt.find("$");
-
-    if (syntax_error && dollar_pos != std::string::npos)
-    {
-        std::string error_prompt =
-            base_prompt.substr(0, dollar_pos) +
-            ERROR_COLOR "$" RESET_COLOR " ";
-        rl_set_prompt(error_prompt.c_str());
-    }
-    else
-    {
-        rl_set_prompt(base_prompt.c_str());
+extern "C" void redisplay_hook() {
+    if (g_enabled) {
+        char* text = rl_copy_text(0, rl_end);
+        const bool bad = text != nullptr && line_has_syntax_error(text);
+        std::free(text);
+        rl_set_prompt(get_prompt(bad).c_str());
     }
     rl_redisplay();
 }

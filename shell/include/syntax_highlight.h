@@ -1,19 +1,18 @@
-#ifndef SYNTAX_HIGHTLIGHT_H
-#define SYNTAX_HIGHTLIGHT_H
+#ifndef SYNTAX_HIGHLIGHT_H
+#define SYNTAX_HIGHLIGHT_H
 
-// Add these near the top of main.cpp
-#include <iostream>
-#include <vector>
 #include <string>
-#include <readline/readline.h>
-#include <readline/history.h>
-#include "lexer.h"
-#define ERROR_COLOR "\001\033[1;31m\002"
-#define RESET_COLOR "\001\033[0m\002"
 
-// Add before process_line function
-int check_syntax(const char *line);
+// While a line is being edited, the "$" of the prompt turns red when the line cannot be parsed.
+
+// True if `line` has a lexical or syntax error (including a line that is still incomplete).
+bool line_has_syntax_error(const std::string& line);
+
+// Turns the highlighting on for the primary prompt and off for continuation prompts.
+void set_syntax_highlight(bool enabled);
+
+// readline hooks: assign these to rl_redisplay_function and rl_char_is_quoted_p.
 extern "C" void redisplay_hook();
-int is_quoted(char *text, int index);
+int is_quoted(char* text, int index);
 
-#endif
+#endif // SYNTAX_HIGHLIGHT_H

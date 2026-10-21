@@ -1,28 +1,41 @@
 #include "history.h"
-#include "prompt.h"
-#include <iostream>
-#include <vector>
-#include <iomanip>
 
-static std::vector<std::string> history;
+#include <readline/history.h>
+
+#include <cstdlib>
 
 namespace History {
 
-    void addHistory(const std::string &command) {
-        history.push_back(command);
-    }
-
-    void printHistory()
-    {
-        int index = 1;
-        for (const auto &cmd : history)
-        {
-            std::cout << COLOR_BLUE << std::setw(4) << index++ << COLOR_RESET
-                      << " " << COLOR_CYAN << cmd << COLOR_RESET << std::endl;
-        }
-    }
-
-    const std::vector<std::string>& getHistory() {
-        return history;
-    }
+namespace {
+constexpr int kMaxEntries = 1000;
 }
+
+std::string filePath() {
+    if (const char* explicit_path = std::getenv("ALPSHELL_HISTFILE")) {
+        if (*explicit_path != '\0') return explicit_path;
+    }
+    if (const char* home = std::getenv("HOME")) {
+        if (*home != '\0') return std::string(home) + "/.alpshell_history";
+    }
+    return "";
+}
+
+void load() {
+    stifle_history(kMaxEntries);
+    const std::string path = filePath();
+    if (!path.empty()) read_history(path.c_str());
+}
+
+void add(const std::string& line) {
+    if (line.empty()) return;
+    HIST_ENTRY* last = history_get(history_base + history_length - 1);
+    if (last != nullptr && line == last->line) return;
+    add_history(line.c_str());
+}
+
+void save() {
+    const std::string path = filePath();
+    if (!path.empty()) write_history(path.c_str());
+}
+
+}  // namespace History

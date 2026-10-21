@@ -1,177 +1,179 @@
 #include "executor.h"
-#include <unistd.h>
+
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
-#include <fcntl.h> // For open() flags if switching from freopen
-#include <iostream>
-#include <vector>
-#include <cstdio>   // For perror
-#include <cstdlib>  // For exit, EXIT_SUCCESS, EXIT_FAILURE
+#include <unistd.h>
 
-// Helper function to execute a single command within a child process
-// This is essentially the core logic moved from the old executeCommand
-// Handles I/O setup and execvp. Called by executePipeline after forking.
-static void runChildCommand(const Command& cmd) {
-    // Handle input redirection if specified
-    if (!cmd.inputFile.empty()) {
-        // Using open/dup2 is generally safer than freopen in complex scenarios
-        int fd_in = open(cmd.inputFile.c_str(), O_RDONLY);
-        if (fd_in < 0) {
-            perror(("Error opening input file: " + cmd.inputFile).c_str());
-            exit(EXIT_FAILURE);
+#include <cerrno>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+#include "job_control.h"
+
+namespace {
+
+void writeErr(const std::string& s) {
+    const char* p = s.data();
+    size_t left = s.size();
+    while (left > 0) {
+        ssize_t n = write(STDERR_FILENO, p, left);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return;
         }
-        if (dup2(fd_in, STDIN_FILENO) < 0) {
-             perror("Error redirecting stdin");
-             close(fd_in); // Close file descriptor on error
-             exit(EXIT_FAILURE);
-        }
-        close(fd_in); // Close original fd after dup2
+        p += n;
+        left -= static_cast<size_t>(n);
     }
+}
 
-    // Handle output redirection if specified
-    if (!cmd.outputFile.empty()) {
-        int flags = O_WRONLY | O_CREAT;
-        if (cmd.appendOutput) {
-            flags |= O_APPEND;
-        } else {
-            flags |= O_TRUNC; // Overwrite
-        }
-        // File permissions (e.g., rw-r--r--)
-        mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
-        int fd_out = open(cmd.outputFile.c_str(), flags, mode);
-        if (fd_out < 0) {
-            perror(("Error opening output file: " + cmd.outputFile).c_str());
-            exit(EXIT_FAILURE);
-        }
-         if (dup2(fd_out, STDOUT_FILENO) < 0) {
-             perror("Error redirecting stdout");
-             close(fd_out);
-             exit(EXIT_FAILURE);
-         }
-        close(fd_out);
+int openFor(const ResolvedRedir& r) {
+    switch (r.op) {
+        case RedirOp::In: return open(r.path.c_str(), O_RDONLY);
+        case RedirOp::Out:
+        case RedirOp::ErrOut: return open(r.path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        default: return open(r.path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0666);
     }
+}
 
-    // Build argument list for execvp
+// Runs in the forked child and never returns.
+[[noreturn]] void runChild(const ProcessSpec& spec, size_t index, int prev_read, const int fds[2], pid_t pgid,
+                           bool background, bool job_control) {
+    if (job_control) {
+        // Join the pipeline's group and, for a foreground job, take the terminal. The parent does the same;
+        // doing it on both sides closes the race on who runs first. This must happen before the signals
+        // are reset: a background process that calls tcsetpgrp would be stopped by SIGTTOU.
+        const pid_t group = pgid != 0 ? pgid : getpid();
+        setpgid(0, group);
+        if (!background) tcsetpgrp(JobControl::terminal_fd(), group);
+    }
+    JobControl::reset_signals_in_child(background && !job_control);
+
+    if (background && !job_control && index == 0) {
+        // POSIX: an asynchronous command in a shell without job control reads from /dev/null.
+        const int null_fd = open("/dev/null", O_RDONLY);
+        if (null_fd >= 0) {
+            dup2(null_fd, STDIN_FILENO);
+            close(null_fd);
+        }
+    }
+    if (prev_read != -1) {
+        dup2(prev_read, STDIN_FILENO);
+        close(prev_read);
+    }
+    if (fds[1] != -1) {
+        close(fds[0]);
+        dup2(fds[1], STDOUT_FILENO);
+        close(fds[1]);
+    }
+    if (!applyRedirections(spec.redirs)) _exit(1);
+    for (const auto& assignment : spec.env) setenv(assignment.first.c_str(), assignment.second.c_str(), 1);
+    if (spec.builtin) _exit(spec.builtin() & 0xFF);  // a builtin inside a pipeline runs in the child
+    if (spec.argv.empty()) _exit(0);
+
     std::vector<char*> args;
-    args.push_back(const_cast<char*>(cmd.executable.c_str()));
-    for (const auto& arg : cmd.arguments) { // Use const auto&
-        args.push_back(const_cast<char*>(arg.c_str()));
-    }
-    args.push_back(nullptr); // execvp expects a null-terminated array
+    for (const std::string& a : spec.argv) args.push_back(const_cast<char*>(a.c_str()));
+    args.push_back(nullptr);
+    execvp(args[0], args.data());
 
-    // Execute the command
-    if (execvp(cmd.executable.c_str(), args.data()) == -1) {
-        perror(("Error executing command: " + cmd.executable).c_str());
-        exit(EXIT_FAILURE); // Exit child if exec fails
+    const int err = errno;
+    const std::string& cmd = spec.argv[0];
+    if (err == ENOENT) {
+        writeErr("alpshell: " + cmd + ": " + (cmd.find('/') == std::string::npos ? "command not found" : std::strerror(err)) + "\n");
+        _exit(127);
     }
-    // Should not reach here if execvp succeeds
+    writeErr("alpshell: " + cmd + ": " + std::strerror(err) + "\n");
+    _exit(126);
 }
 
+}  // namespace
 
-// --- New Pipeline Execution Function ---
-pid_t executePipeline(const std::vector<Command>& commands, bool background) {
-    int numCommands = commands.size();
-    if (numCommands == 0) {
-        return 0; // Nothing to execute
-    }
-
-    int prev_pipe_read_end = -1; // Read end of the pipe from the *previous* command
-    std::vector<pid_t> child_pids;
-    pid_t last_pid = 0;
-
-    for (int i = 0; i < numCommands; ++i) {
-        int pipefds[2]; // pipefds[0] = read end, pipefds[1] = write end
-
-        // Create a pipe for all commands except the last one
-        if (i < numCommands - 1) {
-            if (pipe(pipefds) < 0) {
-                perror("Pipe creation failed");
-                // Cleanup: kill already created children? Complex, skip for now.
-                return 0; // Indicate failure
-            }
+bool applyRedirections(const std::vector<ResolvedRedir>& redirs) {
+    for (const ResolvedRedir& r : redirs) {
+        if (r.op == RedirOp::ErrToOut) {
+            dup2(STDOUT_FILENO, STDERR_FILENO);
+            continue;
         }
-
-        pid_t pid = fork();
-
-        if (pid < 0) {
-            perror("Fork failed");
-            // Cleanup? Close pipe ends?
-            if (i < numCommands - 1) {
-                close(pipefds[0]);
-                close(pipefds[1]);
-            }
-            if (prev_pipe_read_end != -1) {
-                 close(prev_pipe_read_end);
-            }
-            return 0; // Indicate failure
+        if (r.op == RedirOp::OutToErr) {
+            dup2(STDERR_FILENO, STDOUT_FILENO);
+            continue;
         }
-
-        if (pid == 0) { // --- Child Process ---
-            // Redirect standard input if not the first command
-            if (prev_pipe_read_end != -1) {
-                if (dup2(prev_pipe_read_end, STDIN_FILENO) < 0) {
-                    perror("Child: Failed to redirect stdin from pipe");
-                    exit(EXIT_FAILURE);
-                }
-                close(prev_pipe_read_end); // Close original read end
-            }
-
-            // Redirect standard output if not the last command
-            if (i < numCommands - 1) {
-                 // Close the read end of the *current* pipe, child doesn't need it
-                 close(pipefds[0]);
-                if (dup2(pipefds[1], STDOUT_FILENO) < 0) {
-                    perror("Child: Failed to redirect stdout to pipe");
-                     close(pipefds[1]); // Close write end on error
-                    exit(EXIT_FAILURE);
-                }
-                close(pipefds[1]); // Close original write end after dup2
-            }
-
-            // Now handle file redirection specific to this command
-            // (This will override pipe redirection if specified for first/last command)
-            // Use the helper function which includes file redirection logic
-            runChildCommand(commands[i]);
-
-            // runChildCommand exits on failure, so we should only reach here if execvp fails inside it.
-            // It already prints an error and exits.
-            exit(EXIT_FAILURE); // Just in case runChildCommand logic changes
-
-        } else { // --- Parent Process ---
-            last_pid = pid; // Keep track of the last PID for background jobs/return value
-            child_pids.push_back(pid);
-
-             // Close the read end of the previous pipe (parent doesn't need it)
-            if (prev_pipe_read_end != -1) {
-                close(prev_pipe_read_end);
-            }
-
-            // Close the write end of the current pipe (parent doesn't need it)
-            if (i < numCommands - 1) {
-                close(pipefds[1]);
-                prev_pipe_read_end = pipefds[0]; // Save the read end for the *next* child
-            }
+        const int fd = openFor(r);
+        if (fd < 0) {
+            writeErr("alpshell: " + r.path + ": " + std::strerror(errno) + "\n");
+            return false;
         }
-    } // --- End of loop through commands ---
-
-    // If running in the foreground, wait for all children
-    if (!background) {
-        int status;
-        for (pid_t child_pid : child_pids) {
-            // WUNTRACED allows catching stopped jobs (Ctrl+Z), though not fully handled yet
-            waitpid(child_pid, &status, WUNTRACED);
-            // Could check WIFEXITED, WEXITSTATUS, WIFSIGNALED, etc. here if needed
+        const int target = r.op == RedirOp::In ? STDIN_FILENO
+                           : (r.op == RedirOp::ErrOut || r.op == RedirOp::ErrAppend) ? STDERR_FILENO
+                                                                                     : STDOUT_FILENO;
+        if (fd != target) {
+            dup2(fd, target);
+            close(fd);
         }
     }
-    // If running in background, the parent returns immediately (caller adds job)
-
-    return last_pid; // Return PID of the last command
+    return true;
 }
 
-// --- Old executeCommand can be removed or kept if needed elsewhere ---
-// For simplicity, let's assume executePipeline handles the single command case.
-// If you *need* executeCommand specifically, you can make it call executePipeline:
-void executeCommand(const Command& cmd) {
-     std::vector<Command> single_command_pipeline;
-     single_command_pipeline.push_back(cmd);
-     executePipeline(single_command_pipeline, false); // Execute single command in foreground
+PipelineResult launchPipeline(const std::vector<ProcessSpec>& procs, bool background, const std::string& text) {
+    PipelineResult result;
+    const size_t n = procs.size();
+    if (n == 0) return result;
+
+    const bool job_control = JobControl::enabled();
+    std::vector<pid_t> pids;
+    pid_t pgid = 0;
+    int prev_read = -1;
+
+    // Do not let the children inherit text that is still sitting in our stdio buffers.
+    std::fflush(nullptr);
+
+    auto fail = [&](const char* what, int fds[2]) {
+        const int err = errno;
+        if (fds[0] != -1) close(fds[0]);
+        if (fds[1] != -1) close(fds[1]);
+        if (prev_read != -1) close(prev_read);
+        // Children that were already started must not be left running with half a pipeline.
+        JobControl::abort_launch(pgid, pids);
+        writeErr(std::string("alpshell: ") + what + ": " + std::strerror(err) + "\n");
+        result.launched = false;
+        result.status = 1;
+        return result;
+    };
+
+    for (size_t i = 0; i < n; ++i) {
+        int fds[2] = {-1, -1};
+        if (i + 1 < n && pipe2(fds, O_CLOEXEC) < 0) return fail("pipe", fds);
+
+        const pid_t pid = fork();
+        if (pid < 0) return fail("fork", fds);
+        if (pid == 0) runChild(procs[i], i, prev_read, fds, pgid, background, job_control);
+
+        if (job_control) {
+            if (pgid == 0) pgid = pid;
+            setpgid(pid, pgid);
+        }
+        pids.push_back(pid);
+        if (prev_read != -1) close(prev_read);
+        if (fds[1] != -1) close(fds[1]);
+        prev_read = fds[0];
+    }
+
+    result.last_pid = pids.back();
+    Job* job = JobControl::add_job(job_control ? pgid : 0, pids, text, !background);
+    if (!background) result.status = JobControl::put_in_foreground(job, false, &result.stopped);
+    return result;
+}
+
+RedirectionScope::RedirectionScope(const std::vector<ResolvedRedir>& redirs) {
+    for (int fd = 0; fd < 3; ++fd) saved_[fd] = fcntl(fd, F_DUPFD_CLOEXEC, 10);
+    ok_ = applyRedirections(redirs);
+}
+
+RedirectionScope::~RedirectionScope() {
+    for (int fd = 0; fd < 3; ++fd) {
+        if (saved_[fd] < 0) continue;
+        dup2(saved_[fd], fd);
+        close(saved_[fd]);
+    }
 }
