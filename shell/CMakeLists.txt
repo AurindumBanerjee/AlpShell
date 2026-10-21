@@ -40,7 +40,7 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/unit_tests.cpp)
   add_test(NAME unit_tests COMMAND unit_tests)
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_FOUND)
-    foreach(py_test run_script_tests pty_tests fork_failure_test)
+    foreach(py_test run_script_tests cli_test pty_tests fork_failure_test)
       add_test(NAME ${py_test}
                COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/${py_test}.py
                        --shell $<TARGET_FILE:alpshell>)

@@ -27,7 +27,10 @@ class Terminal:
     def __init__(self, home):
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
-            os.environ.update(HOME=home, TERM="xterm", LC_ALL="C", ALPSHELL_HISTFILE=os.path.join(home, "history"))
+            # A fixed PATH keeps the tests independent of the machine (under WSL, for example, PATH also lists the
+            # Windows directories, whose programs would make some completions ambiguous).
+            os.environ.update(HOME=home, TERM="xterm", LC_ALL="C", PATH="/usr/local/bin:/usr/bin:/bin",
+                              ALPSHELL_HISTFILE=os.path.join(home, "history"))
             os.execv(SHELL, [SHELL])
         self.buf = ""
         self.mark = 0
@@ -359,6 +362,45 @@ class StatusAndSessionTests(unittest.TestCase):
             time.sleep(0.2)
             term.echoes("BACK_TO_NORMAL")
             self.assertNotIn("never printed\r\n", term.buf[term.buf.rfind("echo \"never") + 20:])
+        finally:
+            term.close()
+
+    def test_tab_completes_builtins_and_commands_in_command_position(self):
+        term = self.start()
+        try:
+            term.send("unse\t")  # `unset` is only a builtin: a unique completion
+            term.expect(r"unset ")
+            term.send(CTRL_C)
+            time.sleep(0.2)
+            term.send("pytho\t")  # an executable on PATH: python3 and python3.12 share the prefix "python3"
+            term.expect(r"pytho\x07?n3")  # readline rings the bell (the choice is ambiguous) and inserts the prefix
+            term.send(CTRL_C)
+            time.sleep(0.2)
+            term.echoes("STILL_ALIVE_8")
+        finally:
+            term.close()
+
+    def test_tab_completes_file_names_in_argument_position(self):
+        open(os.path.join(self.home.name, "unique_file_name_xyz"), "w").close()
+        term = self.start()
+        try:
+            term.line("cd " + self.home.name)
+            term.expect(r"\$ ")
+            term.send("echo unique_file_n\t")
+            term.expect(r"ame_xyz ")
+        finally:
+            term.close()
+
+    def test_the_prompt_dollar_turns_red_while_the_line_does_not_parse(self):
+        term = self.start()
+        try:
+            term.send("echo a |")  # incomplete: ends in an operator
+            term.expect(r"\x1b\[31m\x1b\[1m\$ ")
+            term.send(" cat")  # now it parses again: the $ goes back to green
+            term.expect(r"\x1b\[32m\x1b\[1m\$ ")
+            term.send(CTRL_C)
+            time.sleep(0.2)
+            term.echoes("STILL_ALIVE_9")
         finally:
             term.close()
 
