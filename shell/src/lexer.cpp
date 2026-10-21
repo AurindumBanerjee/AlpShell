@@ -257,12 +257,23 @@ std::vector<Token> Lexer::tokenize(const std::string &input)
 
     auto emitToken = [&](TokenType type, size_t start, size_t end)
     {
+        // An operator token has no accumulated text. Give it its own spelling so that the check below
+        // does not discard it; without this, |, <, > and >> never reached the parser.
+        if (type == TokenType::PIPE)
+            currentTokenValue = "|";
+        else if (type == TokenType::REDIRECT_IN)
+            currentTokenValue = "<";
+        else if (type == TokenType::REDIRECT_OUT)
+            currentTokenValue = ">";
+        else if (type == TokenType::REDIRECT_APPEND)
+            currentTokenValue = ">>";
+
         if (!currentTokenValue.empty() || type == TokenType::END)
         {
             Token newToken;
             newToken.type = type;
             newToken.value = currentTokenValue;
-            newToken.quoting = currentQuoting;
+            newToken.quoting = type == TokenType::IDENTIFIER ? currentQuoting : QuotingType::NONE;
             newToken.start_pos = start;
             newToken.end_pos = end;
             tokens.push_back(newToken);
